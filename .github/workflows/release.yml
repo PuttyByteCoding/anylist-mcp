@@ -63,4 +63,5 @@ jobs:
         run: |
           npm install -g @anthropic-ai/mcpb
           npx mcpb pack
-          gh release upload "v${{ steps.version.outputs.version }}" anylist-mcp.mcpb --clobber
+          mv anylist-mcp.mcpb "anylist-mcp-v${{ steps.version.outputs.version }}.mcpb"
+          gh release upload "v${{ steps.version.outputs.version }}" "anylist-mcp-v${{ steps.version.outputs.version }}.mcpb" --clobber
