@@ -2,7 +2,7 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from '../../src/tools/recipes.js';
 import { MockAnyListClient, createMockServer } from './helpers.js';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -234,6 +234,73 @@ describe('recipes tool', () => {
       assert.ok(text.includes('**Glaze**'));
       assert.ok(text.includes('- 1/3 cup ketchup'));
       assert.ok(!text.includes('- Glaze'));
+    });
+  });
+
+  describe('apply_updates', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anylist-apply-'));
+    const write = (name, data) => { const p = join(dir, name); writeFileSync(p, JSON.stringify(data)); return p; };
+
+    it('applies every entry in the file', async () => {
+      client._recipes.push(
+        { identifier: 'r-1', name: 'A', prepTime: 5 },
+        { identifier: 'r-2', name: 'B', prepTime: 5 },
+      );
+      const p = write('two.json', [
+        { id: 'r-1', prep_time: 20 },
+        { id: 'r-2', prep_time: 30, note: 'changed' },
+      ]);
+      const result = await handlers.recipes({ action: 'apply_updates', path: p });
+      assert.ok(result.content[0].text.includes('Applied 2 of 2'));
+      assert.equal(client._recipes[0].prepTime, 20);
+      assert.equal(client._recipes[1].prepTime, 30);
+      assert.equal(client._recipes[1].note, 'changed');
+    });
+
+    it('dry run reports without writing', async () => {
+      client._recipes.push({ identifier: 'r-1', name: 'A', prepTime: 5 });
+      const p = write('dry.json', [{ id: 'r-1', prep_time: 99 }]);
+      const result = await handlers.recipes({ action: 'apply_updates', path: p, dry_run: true });
+      assert.ok(result.content[0].text.includes('Dry run: 1 of 1'));
+      assert.equal(client._recipes[0].prepTime, 5, 'nothing written');
+    });
+
+    it('keeps going when one entry fails, and names the failures', async () => {
+      client._recipes.push({ identifier: 'r-1', name: 'A', prepTime: 5 });
+      const p = write('mixed.json', [
+        { id: 'r-1', prep_time: 20 },
+        { id: 'r-missing', prep_time: 20 },
+        { prep_time: 20 },
+      ]);
+      const result = await handlers.recipes({ action: 'apply_updates', path: p });
+      const text = result.content[0].text;
+      assert.ok(text.includes('Applied 1 of 3'));
+      assert.ok(text.includes('r-missing'));
+      assert.ok(text.includes('missing id'));
+      assert.equal(client._recipes[0].prepTime, 20, 'the good entry still applied');
+    });
+
+    it('passes ingredient headings through', async () => {
+      client._recipes.push({ identifier: 'r-1', name: 'A', ingredients: [] });
+      const p = write('head.json', [{ id: 'r-1', ingredients: [
+        { name: 'For the sauce', quantity: '', is_heading: true },
+        { name: 'tomatoes', quantity: '2 cups', note: 'diced' },
+      ]}]);
+      await handlers.recipes({ action: 'apply_updates', path: p });
+      const ing = client._recipes[0].ingredients;
+      assert.equal(ing[0].isHeading, true);
+      assert.equal(ing[1].note, 'diced');
+    });
+
+    it('requires a path', async () => {
+      const result = await handlers.recipes({ action: 'apply_updates' });
+      assert.ok(result.content[0].text.includes('requires "path"'));
+    });
+
+    it('rejects a file that is not an array', async () => {
+      const p = write('obj.json', { id: 'r-1' });
+      const result = await handlers.recipes({ action: 'apply_updates', path: p });
+      assert.ok(result.content[0].text.includes('JSON array'));
     });
   });
 

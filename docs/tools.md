@@ -93,6 +93,7 @@ Manage AnyList recipes, including URL import and text parsing.
 | `save` | boolean | No | Save normalized result to AnyList (normalize only) |
 | `path` | string | No | Destination directory for `backup` (default `./anylist-backup-<timestamp>/`). A leading `~/` is expanded. |
 | `include_photos` | boolean | No | Download photo files during `backup` (default `true`) |
+| `dry_run` | boolean | No | Validate and preview without writing (`apply_updates` only) |
 
 **Backup layout:**
 
@@ -160,6 +161,13 @@ order as its `photoIds`, recording the saved path or the download error.
     { "name": "ketchup", "quantity": "1/3 cup" }
   ]
 } }
+
+// Apply a large edit from a file instead of one call per recipe
+{ "name": "recipes", "arguments": { "action": "apply_updates", "path": "~/changes.json", "dry_run": true } }
+{ "name": "recipes", "arguments": { "action": "apply_updates", "path": "~/changes.json" } }
+// changes.json is an array: [{ "id": "<recipeId>", "prep_time": 25, "note": "…", "ingredients": [...] }, …]
+// Each entry accepts the same fields as `update`. Failures are reported per entry; one bad
+// entry does not stop the rest.
 
 // Back up the whole library (one API call for metadata, plus one download per photo)
 { "name": "recipes", "arguments": { "action": "backup" } }
