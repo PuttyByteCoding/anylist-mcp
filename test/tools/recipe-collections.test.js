@@ -54,4 +54,44 @@ describe('recipe_collections tool', () => {
       assert.ok(result.content[0].text.includes('not found'));
     });
   });
+
+  describe('membership', () => {
+    it('adds recipes to an existing collection without recreating it', async () => {
+      client._collections.push({ identifier: 'c-9', name: 'Chicken', recipeIds: ['r-1'], recipeCount: 1, recipeNames: [] });
+      const result = await handlers.recipe_collections({ action: 'add_recipes', name: 'Chicken', recipe_ids: ['r-2', 'r-3'] });
+      assert.ok(result.content[0].text.includes('Added 2 recipe(s) to "Chicken"'));
+      assert.deepEqual(client._collections[0].recipeIds, ['r-1', 'r-2', 'r-3']);
+      assert.equal(client._collections.length, 1);
+    });
+
+    it('skips recipes already in the collection', async () => {
+      client._collections.push({ identifier: 'c-9', name: 'Chicken', recipeIds: ['r-1'], recipeCount: 1, recipeNames: [] });
+      const result = await handlers.recipe_collections({ action: 'add_recipes', name: 'Chicken', recipe_ids: ['r-1'] });
+      assert.ok(result.content[0].text.includes('Skipped 1'));
+      assert.deepEqual(client._collections[0].recipeIds, ['r-1']);
+    });
+
+    it('removes recipes from a collection', async () => {
+      client._collections.push({ identifier: 'c-9', name: 'Chicken', recipeIds: ['r-1', 'r-2'], recipeCount: 2, recipeNames: [] });
+      const result = await handlers.recipe_collections({ action: 'remove_recipes', name: 'Chicken', recipe_ids: ['r-1'] });
+      assert.ok(result.content[0].text.includes('Removed 1 recipe(s) from "Chicken"'));
+      assert.deepEqual(client._collections[0].recipeIds, ['r-2']);
+    });
+
+    it('can target a collection by id when names are duplicated', async () => {
+      client._collections.push(
+        { identifier: 'c-big', name: 'Beef', recipeIds: [], recipeCount: 0, recipeNames: [] },
+        { identifier: 'c-stub', name: 'Beef', recipeIds: [], recipeCount: 0, recipeNames: [] },
+      );
+      await handlers.recipe_collections({ action: 'add_recipes', name: 'c-stub', recipe_ids: ['r-7'] });
+      assert.deepEqual(client._collections[0].recipeIds, []);
+      assert.deepEqual(client._collections[1].recipeIds, ['r-7']);
+    });
+
+    it('requires recipe_ids', async () => {
+      client._collections.push({ identifier: 'c-9', name: 'Chicken', recipeIds: [], recipeCount: 0, recipeNames: [] });
+      const result = await handlers.recipe_collections({ action: 'add_recipes', name: 'Chicken' });
+      assert.ok(result.content[0].text.includes('recipe_ids'));
+    });
+  });
 });
