@@ -231,6 +231,11 @@ Organize recipes into named collections.
 
 Deleting a collection removes only the collection; the recipes in it are kept.
 
+`remove_recipes` sends only the targeted recipe IDs. The underlying
+`remove-recipes-from-collection` handler removes every ID present in the
+payload, so sending the collection's full membership (as `anylist-js`'s
+`RecipeCollection.removeRecipe()` does) empties the entire collection.
+
 **Actions:**
 
 ```json
