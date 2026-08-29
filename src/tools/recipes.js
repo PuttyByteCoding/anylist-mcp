@@ -6,6 +6,9 @@ import { textResponse, errorResponse } from "./helpers.js";
 import { createElicitationHelpers } from "./elicitation.js";
 import { normalizeRecipe } from "../recipe-normalizer.js";
 
+// AnyList's sync payload populates photoIds but leaves photoUrls empty; clients
+// build the URL from the ID. Verified public (no auth) against photos.anylist.com.
+const PHOTO_BASE_URL = "https://photos.anylist.com";
 const PHOTO_CONCURRENCY = 5;
 const PHOTO_TIMEOUT_MS = 30000;
 
@@ -19,10 +22,14 @@ function photoExtension(url) {
 async function downloadPhotos(recipes, dir) {
   const jobs = [];
   for (const recipe of recipes) {
-    (recipe.photoUrls || []).forEach((url, index) => {
-      const photoId = (recipe.photoIds || [])[index] || `${index}`;
-      jobs.push({ recipeId: recipe.identifier, photoId, url, index });
-    });
+    const ids = recipe.photoIds || [];
+    const urls = recipe.photoUrls || [];
+    for (let index = 0; index < Math.max(ids.length, urls.length); index++) {
+      const photoId = ids[index] || null;
+      const url = urls[index] || (photoId ? `${PHOTO_BASE_URL}/${photoId}.jpg` : null);
+      if (!url) continue;
+      jobs.push({ recipeId: recipe.identifier, photoId: photoId || `${index}`, url, index });
+    }
   }
   // Slot-indexed so the manifest keeps each recipe's photo order regardless of
   // which download finishes first — photoFiles[i] must line up with photoIds[i].

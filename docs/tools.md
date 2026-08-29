@@ -102,6 +102,10 @@ anylist-backup-2026-08-29T15-42-00-000Z/
   photos/<recipeId>/<photoId>.jpg
 ```
 
+Photo URLs are derived as `https://photos.anylist.com/<photoId>.jpg`. AnyList's
+sync payload populates `photoIds` but leaves `photoUrls` empty, so the URL is
+built from the ID; an explicit `photoUrls` entry, if present, wins.
+
 `recipes.json` holds every recipe at full fidelity — ingredient IDs and `isHeading`
 flags, ratings, nutrition, photo IDs and URLs, both timestamps — plus every
 collection's `recipeIds`. Times are the raw AnyList values, in **seconds**, so a

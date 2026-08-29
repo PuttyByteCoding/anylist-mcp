@@ -324,6 +324,19 @@ describe('recipes tool', () => {
       assert.equal(saved.counts.recipes, 1);
     });
 
+    it('builds photo URLs from photoIds when photoUrls is empty', async () => {
+      // AnyList populates photoIds but leaves photoUrls empty in the sync payload.
+      client._recipes.push({ identifier: 'r-real', name: 'Turmeric Rice', photoIds: ['abc123'], photoUrls: [] });
+      const dir = join(tmpDir, 'derived-urls');
+      await handlers.recipes({ action: 'backup', path: dir });
+      const saved = JSON.parse(readFileSync(join(dir, 'recipes.json'), 'utf8'));
+      // Assert the URL we derive, not the download result — the real host is not
+      // reachable from the test environment.
+      const photo = saved.recipes[0].photoFiles[0];
+      assert.equal(photo.url, 'https://photos.anylist.com/abc123.jpg');
+      assert.equal(photo.photoId, 'abc123');
+    });
+
     it('skips downloads when include_photos is false', async () => {
       client._recipes.push({ identifier: 'r-3', name: 'Chili', photoIds: ['p-x'], photoUrls: [`${photoBase}/x.jpg`] });
       const dir = join(tmpDir, 'no-photos');
