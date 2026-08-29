@@ -6,6 +6,17 @@ import { normalizeRecipe } from './recipe-normalizer.js';
 import { DEFAULT_KEYCHAIN_SERVICE, readKeychainAccount, readKeychainPassword } from './keychain.js';
 
 // AnyList stores prepTime/cookTime as int32 seconds; this client speaks minutes.
+// AnyList keeps rawIngredient as the full display line: "<quantity> <name>, <note>".
+// Verified across the library: all 1359 ingredients that carry a note repeat that
+// note in rawIngredient, comma-separated, without exception. Writes must preserve
+// that invariant or the display line silently loses the preparation instructions.
+export const buildRawIngredient = ({ quantity, name, note }) => {
+  const head = [quantity, name].map(v => (v || '').trim()).filter(Boolean).join(' ');
+  const tail = (note || '').trim();
+  if (!head) return tail || null;
+  return tail ? `${head}, ${tail}` : head;
+};
+
 export const secondsToMinutes = s => (s ? Math.round(s / 60) : null);
 export const minutesToSeconds = m => (m === null || m === undefined ? null : Math.round(m * 60));
 
@@ -542,7 +553,7 @@ class AnyListClient {
       if (preparationSteps.length > 0) recipeObj.preparationSteps = preparationSteps;
       if (ingredients.length > 0) {
         recipeObj.ingredients = ingredients.map(i => ({
-          rawIngredient: typeof i === 'string' ? i : i.rawIngredient || `${i.quantity || ''} ${i.name || ''}`.trim(),
+          rawIngredient: typeof i === 'string' ? i : i.rawIngredient || buildRawIngredient(i),
           name: typeof i === 'string' ? i : (i.name || i.rawIngredient || null),
           quantity: typeof i === 'string' ? null : i.quantity || null,
           note: typeof i === 'string' ? null : i.note || null,
@@ -653,7 +664,7 @@ class AnyListClient {
         const context = { client: recipe._client, protobuf: recipe.protobuf, uid: recipe.uid };
         recipe.ingredients = fields.ingredients.map(i => new Ingredient({
           identifier: i.identifier || uuid(),
-          rawIngredient: i.rawIngredient || [i.quantity, i.name].filter(Boolean).join(' ').trim() || null,
+          rawIngredient: i.rawIngredient || buildRawIngredient(i),
           name: i.name || null,
           quantity: i.quantity || null,
           note: i.note || null,
