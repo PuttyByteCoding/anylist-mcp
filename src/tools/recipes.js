@@ -1,43 +1,99 @@
+import { writeFile, mkdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { z } from "zod";
 import { textResponse, errorResponse } from "./helpers.js";
 import { createElicitationHelpers } from "./elicitation.js";
 import { normalizeRecipe } from "../recipe-normalizer.js";
 
+const PHOTO_CONCURRENCY = 5;
+const PHOTO_TIMEOUT_MS = 30000;
+
+function photoExtension(url) {
+  const match = /\.(jpe?g|png|gif|webp|heic)(?:$|\?)/i.exec(url);
+  return match ? `.${match[1].toLowerCase()}` : '.jpg';
+}
+
+// Downloads every recipe photo into <dir>/photos/<recipeId>/. One failure does not
+// abort the backup; each photo's outcome is recorded in the returned manifest.
+async function downloadPhotos(recipes, dir) {
+  const jobs = [];
+  for (const recipe of recipes) {
+    (recipe.photoUrls || []).forEach((url, index) => {
+      const photoId = (recipe.photoIds || [])[index] || `${index}`;
+      jobs.push({ recipeId: recipe.identifier, photoId, url, index });
+    });
+  }
+  // Slot-indexed so the manifest keeps each recipe's photo order regardless of
+  // which download finishes first — photoFiles[i] must line up with photoIds[i].
+  const results = new Array(jobs.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < jobs.length) {
+      const slot = cursor++;
+      const job = jobs[slot];
+      const relative = `photos/${job.recipeId}/${job.photoId}${photoExtension(job.url)}`;
+      try {
+        const response = await fetch(job.url, { signal: AbortSignal.timeout(PHOTO_TIMEOUT_MS) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const bytes = Buffer.from(await response.arrayBuffer());
+        const target = join(dir, relative);
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, bytes);
+        results[slot] = { ...job, file: relative, bytes: bytes.length, status: 'saved' };
+      } catch (error) {
+        results[slot] = { ...job, file: null, bytes: 0, status: 'failed', error: error.message };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(PHOTO_CONCURRENCY, jobs.length) }, worker));
+  return results;
+}
+
 export function register(server, getClient) {
-  const { elicitRequiredField, elicitConfirmation } = createElicitationHelpers(server);
+  const { elicitRequiredField } = createElicitationHelpers(server);
 
   server.registerTool("recipes", {
     title: "Recipes",
     description: `Manage AnyList recipes. Actions:
 - list: Browse recipes in pages (returns summaries: name, rating, times, servings). Use 'search' to filter.
 - get: Get full recipe details (ingredients, steps) by name or recipe ID
-- create: Create a new recipe
+- create: Create a new recipe. If the name is taken, saves as "<name>-v1", "-v2", etc. rather than overwriting.
+- update: Change fields on an existing recipe in place. Only the fields you pass are touched; everything else (photos, rating, nutrition, collections) is preserved. Returns the old and new value of each changed field.
 - delete: Delete a recipe by name
 - import_url: Import a recipe from a website URL (parses ingredients, steps, etc.)
-- normalize: Preview/parse a recipe from a URL or raw text without saving (set save=true to also save)`,
+- normalize: Preview/parse a recipe from a URL or raw text without saving (set save=true to also save)
+- backup: Write every recipe and collection to a local backup directory at full fidelity (ingredient IDs, headings, ratings, nutrition, collection membership), and download the photo files. One API call regardless of library size; photos are one download each.`,
     inputSchema: {
-      action: z.enum(["list", "get", "create", "delete", "import_url", "normalize"]).describe("The recipe action to perform"),
-      name: z.string().optional().describe("Recipe name or ID (required for get, name required for create and delete)"),
+      action: z.enum(["list", "get", "create", "update", "delete", "import_url", "normalize", "backup"]).describe("The recipe action to perform"),
+      name: z.string().optional().describe("Recipe name or ID (required for get, update and delete; name required for create)"),
+      new_name: z.string().optional().describe("Rename the recipe to this (update only)"),
       search: z.string().optional().describe("Search query to filter recipes (list only)"),
       limit: z.number().int().min(1).max(100).optional().describe("Maximum recipes to return (list only, default 25)"),
       offset: z.number().int().min(0).optional().describe("Number of matching recipes to skip (list only, default 0)"),
       ingredients: z.array(z.object({
         name: z.string().describe("Ingredient name, e.g. 'flour'"),
-        quantity: z.string().describe("Quantity with unit, e.g. '2 cups'"),
-      })).optional().describe("Ingredients with name and quantity (create only)"),
+        quantity: z.string().describe("Quantity with unit, e.g. '2 cups' — AnyList has no separate unit field, the unit belongs here"),
+        note: z.string().optional().describe("Preparation note, e.g. 'chopped'"),
+        is_heading: z.boolean().optional().describe("True if this line is a section heading like 'For the sauce' rather than an ingredient"),
+      })).optional().describe("Ingredients (create, update). On update this replaces the whole list."),
       steps: z.array(z.string()).optional().describe("Preparation steps in order (create only)"),
-      note: z.string().optional().describe("Recipe notes (create only)"),
-      source_name: z.string().optional().describe("Source name (create only)"),
-      source_url: z.string().optional().describe("Source URL (create only)"),
-      prep_time: z.number().optional().describe("Prep time in minutes (create only)"),
-      cook_time: z.number().optional().describe("Cook time in minutes (create only)"),
-      servings: z.string().optional().describe("Servings, e.g. '4' or '4-6' (create only)"),
+      steps_replace: z.array(z.string()).optional().describe("Replacement preparation steps (update only)"),
+      note: z.string().optional().describe("Recipe notes (create, update)"),
+      source_name: z.string().optional().describe("Source name (create, update)"),
+      source_url: z.string().optional().describe("Source URL (create, update)"),
+      prep_time: z.number().optional().describe("Prep time in minutes (create, update)"),
+      cook_time: z.number().optional().describe("Cook time in minutes (create, update)"),
+      rating: z.number().int().min(0).max(5).optional().describe("Rating 0-5 (update only)"),
+      servings: z.string().optional().describe("Servings, e.g. '4' or '4-6' (create, update)"),
       url: z.string().optional().describe("URL to import recipe from (import_url, normalize)"),
       text: z.string().optional().describe("Raw recipe text to parse (normalize only)"),
       save: z.boolean().optional().describe("If true, also save normalized recipe to AnyList (normalize only, default false)"),
+      path: z.string().optional().describe("Directory to write the backup into (backup only). Defaults to ./anylist-backup-<timestamp>/"),
+      include_photos: z.boolean().optional().describe("Download recipe photo files as well as metadata (backup only, default true)"),
     }
   }, async (params) => {
-    const { action, name, search, limit = 25, offset = 0, ingredients, steps, note, source_name, source_url, prep_time, cook_time, servings, url, text: recipeText, save: saveRecipe } = params;
+    const { action, name, new_name, search, limit = 25, offset = 0, ingredients, steps, steps_replace, note, source_name, source_url, prep_time, cook_time, rating, servings, url, text: recipeText, save: saveRecipe, path: backupPath, include_photos: includePhotos = true } = params;
     try {
       const client = await getClient();
       await client.connect(null, { requireList: false });
@@ -79,7 +135,8 @@ export function register(server, getClient) {
           if (recipe.ingredients.length > 0) {
             text += `\n## Ingredients\n`;
             recipe.ingredients.forEach(i => {
-              text += `- ${i.rawIngredient || [i.quantity, i.name, i.note].filter(Boolean).join(' ')}\n`;
+              const line = i.rawIngredient || [i.quantity, i.name, i.note].filter(Boolean).join(' ');
+              text += i.isHeading ? `\n**${line}**\n` : `- ${line}\n`;
             });
           }
           if (recipe.preparationSteps.length > 0) {
@@ -92,17 +149,20 @@ export function register(server, getClient) {
           let recipeName = name;
           if (!recipeName) recipeName = await elicitRequiredField("name", "What should the recipe be called?");
           const existingRecipes = await client.getRecipes(recipeName);
-          const exactMatch = existingRecipes.find(r => r.name.toLowerCase() === recipeName.toLowerCase());
-          if (exactMatch) {
-            const confirmed = await elicitConfirmation(`Recipe "${exactMatch.name}" already exists. Overwrite?`);
-            if (!confirmed) return textResponse(`Cancelled — recipe "${exactMatch.name}" was not overwritten.`);
-            await client.deleteRecipe(exactMatch.name);
+          const taken = new Set(existingRecipes.map(r => r.name.toLowerCase()));
+          let finalName = recipeName;
+          let version = 0;
+          while (taken.has(finalName.toLowerCase())) {
+            version += 1;
+            finalName = `${recipeName}-v${version}`;
           }
           const result = await client.createRecipe({
-            name: recipeName,
+            name: finalName,
             ingredients: (ingredients || []).map(i => ({
               name: i.name,
               quantity: i.quantity,
+              note: i.note || null,
+              isHeading: Boolean(i.is_heading),
               rawIngredient: `${i.quantity} ${i.name}`.trim(),
             })),
             preparationSteps: steps || [],
@@ -113,7 +173,93 @@ export function register(server, getClient) {
             cookTime: cook_time || null,
             servings: servings || null,
           });
-          return textResponse(`Created recipe "${result.name}"`);
+          return textResponse(version > 0
+            ? `Created recipe "${result.name}" ("${recipeName}" already existed, so it was saved as a new version).`
+            : `Created recipe "${result.name}"`);
+        }
+        case "update": {
+          let updateRef = name;
+          if (!updateRef) updateRef = await elicitRequiredField("name", "Which recipe name or ID would you like to update?");
+          const fields = {};
+          if (new_name !== undefined) fields.name = new_name;
+          if (note !== undefined) fields.note = note;
+          if (source_name !== undefined) fields.sourceName = source_name;
+          if (source_url !== undefined) fields.sourceUrl = source_url;
+          if (prep_time !== undefined) fields.prepTime = prep_time;
+          if (cook_time !== undefined) fields.cookTime = cook_time;
+          if (rating !== undefined) fields.rating = rating;
+          if (servings !== undefined) fields.servings = servings;
+          if (steps_replace !== undefined) fields.preparationSteps = steps_replace;
+          if (ingredients !== undefined) {
+            fields.ingredients = ingredients.map(i => ({
+              name: i.name,
+              quantity: i.quantity,
+              note: i.note || null,
+              isHeading: Boolean(i.is_heading),
+            }));
+          }
+          if (Object.keys(fields).length === 0) {
+            throw new Error('Action "update" requires at least one field to change');
+          }
+          const updated = await client.updateRecipe(updateRef, fields);
+          if (updated.changed.length === 0) return textResponse(`No changes — "${updated.name}" already had those values.`);
+          const summary = updated.changed
+            .map(c => `- ${c.field}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`)
+            .join('\n');
+          return textResponse(`Updated "${updated.name}" (${updated.identifier}):\n${summary}`);
+        }
+        case "backup": {
+          const data = await client.exportRecipes();
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const requested = backupPath || `anylist-backup-${stamp}`;
+          const dir = resolve(requested.startsWith('~/') ? join(homedir(), requested.slice(2)) : requested);
+          await mkdir(dir, { recursive: true });
+
+          let photoResults = [];
+          if (includePhotos) {
+            photoResults = await downloadPhotos(data.recipes, dir);
+            const byRecipe = new Map();
+            for (const r of photoResults) {
+              if (!byRecipe.has(r.recipeId)) byRecipe.set(r.recipeId, []);
+              byRecipe.get(r.recipeId).push({ photoId: r.photoId, url: r.url, file: r.file, bytes: r.bytes, status: r.status, ...(r.error ? { error: r.error } : {}) });
+            }
+            for (const recipe of data.recipes) {
+              recipe.photoFiles = byRecipe.get(recipe.identifier) || [];
+            }
+          }
+
+          const saved = photoResults.filter(r => r.status === 'saved');
+          const failed = photoResults.filter(r => r.status === 'failed');
+          const payload = {
+            schema: 'anylist-mcp/recipe-backup@2',
+            exportedAt: new Date().toISOString(),
+            note: 'prepTime and cookTime are raw AnyList values, in seconds. Photo files are under photos/<recipeId>/ and indexed per recipe in photoFiles.',
+            counts: {
+              recipes: data.recipes.length,
+              collections: data.collections.length,
+              photosSaved: saved.length,
+              photosFailed: failed.length,
+            },
+            recipes: data.recipes,
+            collections: data.collections,
+          };
+          const serialized = JSON.stringify(payload, null, 2);
+          await writeFile(join(dir, 'recipes.json'), serialized, 'utf8');
+
+          const photoBytes = saved.reduce((sum, r) => sum + r.bytes, 0);
+          const totalMb = ((Buffer.byteLength(serialized, 'utf8') + photoBytes) / 1024 / 1024).toFixed(2);
+          let out = `Backed up ${payload.counts.recipes} recipes and ${payload.counts.collections} collections to ${dir} (${totalMb} MB total).`;
+          if (includePhotos) {
+            out += `\nPhotos: ${saved.length} saved`;
+            if (failed.length > 0) {
+              const sample = failed.slice(0, 3).map(f => `${f.recipeId}/${f.photoId} (${f.error})`).join('; ');
+              out += `, ${failed.length} failed — ${sample}${failed.length > 3 ? ', …' : ''}`;
+            }
+            out += '.';
+          } else {
+            out += '\nPhotos skipped (include_photos: false).';
+          }
+          return textResponse(out);
         }
         case "delete": {
           let deleteRecipeName = name;

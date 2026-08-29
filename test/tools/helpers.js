@@ -132,6 +132,45 @@ export class MockAnyListClient {
     return { identifier: 'r-1', name: opts.name };
   }
 
+  async exportRecipes() {
+    return {
+      recipes: this._recipes.map(r => ({ ...r, ingredients: r.ingredients || [], preparationSteps: r.preparationSteps || [] })),
+      collections: this._collections.map(c => ({ identifier: c.identifier, name: c.name, recipeIds: c.recipeIds || [] })),
+    };
+  }
+
+  async updateRecipe(reference, fields) {
+    const r = this._recipes.find(x => x.identifier === reference || x.name.toLowerCase() === reference.toLowerCase());
+    if (!r) throw new Error(`Recipe "${reference}" not found`);
+    const map = { name: 'name', note: 'note', sourceName: 'sourceName', sourceUrl: 'sourceUrl',
+      servings: 'servings', rating: 'rating', prepTime: 'prepTime', cookTime: 'cookTime',
+      preparationSteps: 'preparationSteps', ingredients: 'ingredients' };
+    const changed = [];
+    for (const [key, prop] of Object.entries(map)) {
+      if (fields[key] === undefined) continue;
+      if (r[prop] === fields[key]) continue;
+      changed.push({ field: key, from: r[prop] ?? null, to: fields[key] });
+      r[prop] = fields[key];
+    }
+    return { identifier: r.identifier, name: r.name, changed };
+  }
+
+  async modifyCollectionRecipes(reference, recipeIds, mode) {
+    const c = this._collections.find(x => x.identifier === reference || x.name.toLowerCase() === reference.toLowerCase());
+    if (!c) throw new Error(`Recipe collection "${reference}" not found`);
+    c.recipeIds = c.recipeIds || [];
+    const applied = [];
+    const skipped = [];
+    for (const id of recipeIds) {
+      const present = c.recipeIds.includes(id);
+      if (mode === 'add' ? present : !present) { skipped.push(id); continue; }
+      if (mode === 'add') c.recipeIds.push(id);
+      else c.recipeIds.splice(c.recipeIds.indexOf(id), 1);
+      applied.push(id);
+    }
+    return { name: c.name, applied, skipped };
+  }
+
   async deleteRecipe(name) {
     const idx = this._recipes.findIndex(r => r.name.toLowerCase() === name.toLowerCase());
     if (idx === -1) throw new Error(`Recipe "${name}" not found`);
@@ -169,7 +208,7 @@ export class MockAnyListClient {
   async getRecipeCollections() { return [...this._collections]; }
 
   async createRecipeCollection(name, recipeNames = []) {
-    const c = { identifier: 'c-1', name, recipeCount: recipeNames.length, recipeNames };
+    const c = { identifier: 'c-1', name, recipeCount: recipeNames.length, recipeNames, recipeIds: [] };
     this._collections.push(c);
     return c;
   }

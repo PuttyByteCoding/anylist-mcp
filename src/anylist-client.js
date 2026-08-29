@@ -1,7 +1,13 @@
 import AnyList from '../anylist-js/lib/index.js';
 import Item from '../anylist-js/lib/item.js';
+import Ingredient from '../anylist-js/lib/ingredient.js';
+import uuid from '../anylist-js/lib/uuid.js';
 import { normalizeRecipe } from './recipe-normalizer.js';
 import { DEFAULT_KEYCHAIN_SERVICE, readKeychainAccount, readKeychainPassword } from './keychain.js';
+
+// AnyList stores prepTime/cookTime as int32 seconds; this client speaks minutes.
+export const secondsToMinutes = s => (s ? Math.round(s / 60) : null);
+export const minutesToSeconds = m => (m === null || m === undefined ? null : Math.round(m * 60));
 
 // Patch Item._encode to not include 'quantity' field which doesn't exist in protobuf schema
 Item.prototype._encode = function() {
@@ -380,8 +386,8 @@ class AnyListClient {
         sourceName: r.sourceName || null,
         sourceUrl: r.sourceUrl || null,
         rating: r.rating || null,
-        prepTime: r.prepTime || null,
-        cookTime: r.cookTime || null,
+        prepTime: secondsToMinutes(r.prepTime),
+        cookTime: secondsToMinutes(r.cookTime),
         servings: r.servings || null,
         ingredientCount: r.ingredients ? r.ingredients.length : 0,
         stepCount: r.preparationSteps ? r.preparationSteps.length : 0,
@@ -416,19 +422,24 @@ class AnyListClient {
         sourceName: recipe.sourceName || null,
         sourceUrl: recipe.sourceUrl || null,
         rating: recipe.rating || null,
-        prepTime: recipe.prepTime || null,
-        cookTime: recipe.cookTime || null,
+        prepTime: secondsToMinutes(recipe.prepTime),
+        cookTime: secondsToMinutes(recipe.cookTime),
         servings: recipe.servings || null,
         nutritionalInfo: recipe.nutritionalInfo || null,
         createdAt: recipe.creationTimestamp
           ? new Date(recipe.creationTimestamp * 1000).toISOString()
           : (recipe.timestamp ? new Date(recipe.timestamp * 1000).toISOString() : null),
-        ingredients: recipe.ingredients ? recipe.ingredients.map(i => ({
-          rawIngredient: i.rawIngredient || null,
-          name: i.name || null,
-          quantity: i.quantity || null,
-          note: i.note || null,
-        })) : [],
+        ingredients: recipe.ingredients ? recipe.ingredients.map(i => {
+          const j = typeof i.toJSON === 'function' ? i.toJSON() : i;
+          return {
+            identifier: j.identifier || null,
+            rawIngredient: j.rawIngredient || null,
+            name: j.name || null,
+            quantity: j.quantity || null,
+            note: j.note || null,
+            isHeading: Boolean(j.isHeading),
+          };
+        }) : [],
         preparationSteps: recipe.preparationSteps || [],
       };
     } catch (error) {
@@ -525,8 +536,8 @@ class AnyListClient {
       if (note) recipeObj.note = note;
       if (sourceName) recipeObj.sourceName = sourceName;
       if (sourceUrl) recipeObj.sourceUrl = sourceUrl;
-      if (prepTime) recipeObj.prepTime = prepTime;
-      if (cookTime) recipeObj.cookTime = cookTime;
+      if (prepTime) recipeObj.prepTime = minutesToSeconds(prepTime);
+      if (cookTime) recipeObj.cookTime = minutesToSeconds(cookTime);
       if (servings) recipeObj.servings = servings;
       if (preparationSteps.length > 0) recipeObj.preparationSteps = preparationSteps;
       if (ingredients.length > 0) {
@@ -535,6 +546,7 @@ class AnyListClient {
           name: typeof i === 'string' ? i : (i.name || i.rawIngredient || null),
           quantity: typeof i === 'string' ? null : i.quantity || null,
           note: typeof i === 'string' ? null : i.note || null,
+          isHeading: typeof i === 'string' ? false : Boolean(i.isHeading),
         }));
       }
       const recipe = await this.client.createRecipe(recipeObj);
@@ -543,6 +555,120 @@ class AnyListClient {
       return { identifier: recipe.identifier, name: recipe.name };
     } catch (error) {
       throw new Error(`Failed to create recipe: ${error.message}`);
+    }
+  }
+
+  async exportRecipes() {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    try {
+      // getRecipes() returns every recipe in full from one API call, so a complete
+      // export costs the same as reading a single recipe.
+      const recipes = await this.client.getRecipes();
+      const userData = await this.client._getUserData(true);
+      const collections = userData.recipeDataResponse.recipeCollections || [];
+      return {
+        recipes: recipes.map(r => ({
+          identifier: r.identifier,
+          name: r.name ?? null,
+          note: r.note ?? null,
+          sourceName: r.sourceName ?? null,
+          sourceUrl: r.sourceUrl ?? null,
+          rating: r.rating ?? null,
+          // Raw stored values: AnyList keeps these as seconds.
+          prepTime: r.prepTime ?? null,
+          cookTime: r.cookTime ?? null,
+          servings: r.servings ?? null,
+          nutritionalInfo: r.nutritionalInfo ?? null,
+          scaleFactor: r.scaleFactor ?? null,
+          paprikaIdentifier: r.paprikaIdentifier ?? null,
+          creationTimestamp: r.creationTimestamp ?? null,
+          timestamp: r.timestamp ?? null,
+          photoIds: r.photoIds ?? [],
+          photoUrls: r.photoUrls ?? [],
+          preparationSteps: r.preparationSteps ?? [],
+          ingredients: (r.ingredients ?? []).map(i =>
+            (typeof i.toJSON === 'function' ? i.toJSON() : i)),
+        })),
+        collections: collections.map(c => ({
+          identifier: c.identifier,
+          name: c.name ?? null,
+          recipeIds: c.recipeIds ?? [],
+        })),
+      };
+    } catch (error) {
+      throw new Error(`Failed to export recipes: ${error.message}`);
+    }
+  }
+
+  async updateRecipe(recipeReference, fields) {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    try {
+      const recipes = await this.client.getRecipes();
+      const recipe = recipes.find(r =>
+        r.identifier === recipeReference ||
+        (r.name && r.name.toLowerCase() === recipeReference.toLowerCase())
+      );
+      if (!recipe) {
+        throw new Error(`Recipe "${recipeReference}" not found`);
+      }
+
+      const changed = [];
+      const setField = (key, value, encode = v => v) => {
+        if (value === undefined) return;
+        const next = encode(value);
+        const current = recipe[key] ?? null;
+        if (current === next) return;
+        changed.push({ field: key, from: current, to: next });
+        recipe[key] = next;
+      };
+
+      setField('name', fields.name);
+      setField('note', fields.note);
+      setField('sourceName', fields.sourceName);
+      setField('sourceUrl', fields.sourceUrl);
+      setField('servings', fields.servings);
+      setField('rating', fields.rating);
+      setField('prepTime', fields.prepTime, minutesToSeconds);
+      setField('cookTime', fields.cookTime, minutesToSeconds);
+
+      if (fields.preparationSteps !== undefined) {
+        changed.push({
+          field: 'preparationSteps',
+          from: `${recipe.preparationSteps.length} steps`,
+          to: `${fields.preparationSteps.length} steps`,
+        });
+        recipe.preparationSteps = fields.preparationSteps;
+      }
+
+      if (fields.ingredients !== undefined) {
+        changed.push({
+          field: 'ingredients',
+          from: `${recipe.ingredients.length} items`,
+          to: `${fields.ingredients.length} items`,
+        });
+        const context = { client: recipe._client, protobuf: recipe.protobuf, uid: recipe.uid };
+        recipe.ingredients = fields.ingredients.map(i => new Ingredient({
+          identifier: i.identifier || uuid(),
+          rawIngredient: i.rawIngredient || [i.quantity, i.name].filter(Boolean).join(' ').trim() || null,
+          name: i.name || null,
+          quantity: i.quantity || null,
+          note: i.note || null,
+          isHeading: Boolean(i.isHeading),
+        }, context));
+      }
+
+      if (changed.length === 0) {
+        return { identifier: recipe.identifier, name: recipe.name, changed: [] };
+      }
+      await recipe.save();
+      console.error(`Updated recipe: ${recipe.name}`);
+      return { identifier: recipe.identifier, name: recipe.name, changed };
+    } catch (error) {
+      throw new Error(`Failed to update recipe: ${error.message}`);
     }
   }
 
@@ -692,6 +818,7 @@ class AnyListClient {
       return collections.map(c => ({
         identifier: c.identifier,
         name: c.name,
+        recipeIds: c.recipeIds || [],
         recipeCount: c.recipeIds ? c.recipeIds.length : 0,
         recipeNames: (c.recipeIds || []).map(id => {
           const r = recipes.find(r => r.identifier === id);
@@ -722,6 +849,41 @@ class AnyListClient {
       return { identifier: collection.identifier, name: collection.name };
     } catch (error) {
       throw new Error(`Failed to create recipe collection: ${error.message}`);
+    }
+  }
+
+  async modifyCollectionRecipes(collectionReference, recipeIds, mode) {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    try {
+      const userData = await this.client._getUserData(true);
+      const collections = userData.recipeDataResponse.recipeCollections || [];
+      const raw = collections.find(c =>
+        c.identifier === collectionReference ||
+        (c.name && c.name.toLowerCase() === collectionReference.toLowerCase())
+      );
+      if (!raw) throw new Error(`Recipe collection "${collectionReference}" not found`);
+      const collection = this.client.createRecipeCollection(raw);
+      const applied = [];
+      const skipped = [];
+      for (const recipeId of recipeIds) {
+        const present = collection.recipeIds.includes(recipeId);
+        if (mode === 'add' ? present : !present) {
+          skipped.push(recipeId);
+          continue;
+        }
+        if (mode === 'add') {
+          await collection.addRecipe(recipeId);
+        } else {
+          await collection.removeRecipe(recipeId);
+        }
+        applied.push(recipeId);
+      }
+      console.error(`Collection ${raw.name}: ${mode} ${applied.length} recipe(s)`);
+      return { name: raw.name, applied, skipped };
+    } catch (error) {
+      throw new Error(`Failed to ${mode} collection recipes: ${error.message}`);
     }
   }
 
