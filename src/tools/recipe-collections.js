@@ -19,7 +19,7 @@ export function register(server, getClient) {
     const { action, name, recipe_names } = params;
     try {
       const client = await getClient();
-      await client.connect(null);
+      await client.connect(null, { requireList: false });
       switch (action) {
         case "list": {
           const collections = await client.getRecipeCollections();

@@ -9,16 +9,18 @@ export function register(server, getClient) {
   server.registerTool("recipes", {
     title: "Recipes",
     description: `Manage AnyList recipes. Actions:
-- list: Browse recipes (returns summaries: name, rating, times, servings). Use 'search' to filter.
-- get: Get full recipe details (ingredients, steps) by name
+- list: Browse recipes in pages (returns summaries: name, rating, times, servings). Use 'search' to filter.
+- get: Get full recipe details (ingredients, steps) by name or recipe ID
 - create: Create a new recipe
 - delete: Delete a recipe by name
 - import_url: Import a recipe from a website URL (parses ingredients, steps, etc.)
 - normalize: Preview/parse a recipe from a URL or raw text without saving (set save=true to also save)`,
     inputSchema: {
       action: z.enum(["list", "get", "create", "delete", "import_url", "normalize"]).describe("The recipe action to perform"),
-      name: z.string().optional().describe("Recipe name (required for get, create, delete)"),
+      name: z.string().optional().describe("Recipe name or ID (required for get, name required for create and delete)"),
       search: z.string().optional().describe("Search query to filter recipes (list only)"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum recipes to return (list only, default 25)"),
+      offset: z.number().int().min(0).optional().describe("Number of matching recipes to skip (list only, default 0)"),
       ingredients: z.array(z.object({
         name: z.string().describe("Ingredient name, e.g. 'flour'"),
         quantity: z.string().describe("Quantity with unit, e.g. '2 cups'"),
@@ -35,15 +37,16 @@ export function register(server, getClient) {
       save: z.boolean().optional().describe("If true, also save normalized recipe to AnyList (normalize only, default false)"),
     }
   }, async (params) => {
-    const { action, name, search, ingredients, steps, note, source_name, source_url, prep_time, cook_time, servings, url, text: recipeText, save: saveRecipe } = params;
+    const { action, name, search, limit = 25, offset = 0, ingredients, steps, note, source_name, source_url, prep_time, cook_time, servings, url, text: recipeText, save: saveRecipe } = params;
     try {
       const client = await getClient();
-      await client.connect(null);
+      await client.connect(null, { requireList: false });
       switch (action) {
         case "list": {
           const recipes = await client.getRecipes(search || null);
           if (recipes.length === 0) return textResponse(search ? `No recipes found matching "${search}".` : "No recipes found.");
-          const list = recipes.map(r => {
+          const page = recipes.slice(offset, offset + limit);
+          const list = page.map(r => {
             const parts = [`- **${r.name}**`];
             if (r.rating) parts.push(`⭐${r.rating}`);
             if (r.prepTime) parts.push(`prep: ${r.prepTime}min`);
@@ -52,11 +55,17 @@ export function register(server, getClient) {
             parts.push(`(id: ${r.identifier})`);
             return parts.join(' | ');
           }).join('\n');
-          return textResponse(`Recipes (${recipes.length}):\n${list}`);
+          const rangeStart = offset + 1;
+          const rangeEnd = offset + page.length;
+          const nextOffset = offset + page.length;
+          const nextPage = nextOffset < recipes.length
+            ? `\n\nMore results available. Use offset: ${nextOffset}.`
+            : "";
+          return textResponse(`Recipes ${rangeStart}-${rangeEnd} of ${recipes.length}:\n${list}${nextPage}`);
         }
         case "get": {
           let getRecipeName = name;
-          if (!getRecipeName) getRecipeName = await elicitRequiredField("name", "Which recipe would you like to view?");
+          if (!getRecipeName) getRecipeName = await elicitRequiredField("name", "Which recipe name or ID would you like to view?");
           const recipe = await client.getRecipeDetails(getRecipeName);
           let text = `# ${recipe.name}\n\nID: ${recipe.identifier}\n`;
           if (recipe.sourceName) text += `Source: ${recipe.sourceName}\n`;

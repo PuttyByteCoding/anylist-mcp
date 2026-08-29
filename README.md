@@ -26,16 +26,41 @@ These tools work together to enable typical workflows: browse or create recipes 
 
 The fastest way to get started is to download the latest `anylist-mcp.mcpb` from the [releases page](../../releases).
 
-1. Open Claude Desktop → Settings → Extensions
-2. Drag and drop the `.mcpb` file, or click "Advanced settings" → Install extension
-3. Enter your configuration when prompted:
-   - **AnyList Email** — your AnyList account email
-   - **AnyList Password** — your AnyList account password
-   - **Default Shopping List** — optional, defaults to "Groceries"
+### Build a Desktop Extension
+
+Create the local desktop-extension bundle:
+
+```bash
+npm run pack
+```
+
+This produces `anylist-mcp.mcpb` in the project root. The bundle includes the MCP server and dependencies and validates its manifest during packaging.
+
+To verify a locally built bundle:
+
+```bash
+unzip -t anylist-mcp.mcpb
+```
+
+### Install the Bundle
+
+Before installing, create the login-Keychain item the extension uses. macOS securely prompts for the password because `-w` is the final argument:
+
+```bash
+/usr/bin/security add-generic-password -U \
+  -a "you@example.com" \
+  -s "anylist-mcp" \
+  -l "AnyList MCP" \
+  -w
+```
+
+1. Open Claude Desktop → Settings → Extensions.
+2. Drag and drop the `.mcpb` file, or click "Advanced settings" → Install extension.
+3. No AnyList username or password is requested. The extension reads both from the `anylist-mcp` login-Keychain item when it first connects.
 
 ---
 
-## Installation: Claude Code / Claude Desktop (from source)
+## Installation: Claude Code (Recipe-First)
 
 ### Prerequisites
 - [Node.js](https://nodejs.org/) v20+
@@ -49,7 +74,33 @@ cd anylist-mcp
 npm install
 ```
 
-Add to your MCP config (`~/.claude/claude_desktop_config.json` or equivalent):
+The recipe tools do not need a shopping-list name. Configure `ANYLIST_LIST_NAME` only when you also want shopping-list access.
+
+On macOS, save your password in Keychain first. This opens a secure password prompt and does not put the password in a configuration file:
+
+```bash
+npm run keychain:set -- you@example.com
+```
+
+Run the same command again after changing your AnyList password. `ANYLIST_PASSWORD` remains a fallback for non-macOS environments, but should not be committed or put in shared MCP configuration.
+
+Add the local stdio server to Claude Code:
+
+```bash
+claude mcp add \
+  --transport stdio \
+  --scope user \
+  anylist \
+  -e ANYLIST_USERNAME=you@example.com \
+  -e ANYLIST_KEYCHAIN_SERVICE=anylist-mcp \
+  -- /absolute/path/to/node /absolute/path/to/anylist-mcp/src/server.js
+```
+
+Use `command -v node` to find the absolute Node path. Verify the configuration with `claude mcp get anylist`, start a new Claude Code session, then run `/mcp`.
+
+Try: `Search my AnyList recipes for chicken and show the first 10 results.` Recipe lists are paginated with `limit` and `offset`, and a recipe can be read by its AnyList ID or name.
+
+If you prefer manual JSON configuration, use:
 
 ```json
 {
@@ -59,8 +110,7 @@ Add to your MCP config (`~/.claude/claude_desktop_config.json` or equivalent):
       "args": ["/absolute/path/to/anylist-mcp/src/server.js"],
       "env": {
         "ANYLIST_USERNAME": "you@example.com",
-        "ANYLIST_PASSWORD": "yourpassword",
-        "ANYLIST_LIST_NAME": "Groceries"
+        "ANYLIST_KEYCHAIN_SERVICE": "anylist-mcp"
       }
     }
   }

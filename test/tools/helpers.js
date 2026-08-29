@@ -28,6 +28,7 @@ export class MockAnyListClient {
     this.client = null;
     this.targetList = null;
     this._connected = false;
+    this._connectCalls = [];
     this.defaultListName = null;
     this._items = [];
     this._lists = [];
@@ -45,6 +46,7 @@ export class MockAnyListClient {
     this.client = null;
     this.targetList = null;
     this._connected = false;
+    this._connectCalls = [];
     this._items = [];
     this._lists = [];
     this._favorites = [];
@@ -57,7 +59,8 @@ export class MockAnyListClient {
     this._stores = [];
   }
 
-  async connect(listName = null) {
+  async connect(listName = null, options = {}) {
+    this._connectCalls.push({ listName, options });
     const name = listName || process.env.ANYLIST_LIST_NAME || 'Groceries';
     this._connected = true;
     const items = this._items;
@@ -119,7 +122,7 @@ export class MockAnyListClient {
   }
 
   async getRecipeDetails(name) {
-    const r = this._recipes.find(x => x.name.toLowerCase() === name.toLowerCase());
+    const r = this._recipes.find(x => x.identifier === name || x.name.toLowerCase() === name.toLowerCase());
     if (!r) throw new Error(`Recipe "${name}" not found`);
     return { ...r, ingredients: r.ingredients || [], preparationSteps: r.preparationSteps || [] };
   }

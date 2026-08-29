@@ -18,6 +18,7 @@ describe('recipes tool', () => {
     it('returns empty message when no recipes', async () => {
       const result = await handlers.recipes({ action: 'list' });
       assert.ok(result.content[0].text.includes('No recipes found'));
+      assert.deepEqual(client._connectCalls[0], { listName: null, options: { requireList: false } });
     });
 
     it('lists recipes with metadata and id', async () => {
@@ -33,6 +34,20 @@ describe('recipes tool', () => {
       const result = await handlers.recipes({ action: 'list', search: 'pasta' });
       assert.ok(result.content[0].text.includes('Pasta'));
       assert.ok(!result.content[0].text.includes('Salad'));
+    });
+
+    it('paginates recipe results and reports the next offset', async () => {
+      client._recipes.push(
+        { identifier: 'r-1', name: 'First' },
+        { identifier: 'r-2', name: 'Second' },
+        { identifier: 'r-3', name: 'Third' },
+      );
+      const result = await handlers.recipes({ action: 'list', limit: 2 });
+      assert.ok(result.content[0].text.includes('Recipes 1-2 of 3'));
+      assert.ok(result.content[0].text.includes('First'));
+      assert.ok(result.content[0].text.includes('Second'));
+      assert.ok(!result.content[0].text.includes('Third'));
+      assert.ok(result.content[0].text.includes('offset: 2'));
     });
   });
 
@@ -55,6 +70,12 @@ describe('recipes tool', () => {
       const result = await handlers.recipes({ action: 'get', name: 'Nope' });
       assert.equal(result.isError, true);
       assert.ok(result.content[0].text.includes('not found'));
+    });
+
+    it('gets a recipe by its AnyList identifier', async () => {
+      client._recipes.push({ identifier: 'r-xyz', name: 'Pasta', ingredients: [], preparationSteps: [] });
+      const result = await handlers.recipes({ action: 'get', name: 'r-xyz' });
+      assert.ok(result.content[0].text.includes('# Pasta'));
     });
   });
 

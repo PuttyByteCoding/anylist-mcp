@@ -1,6 +1,7 @@
 import AnyList from '../anylist-js/lib/index.js';
 import Item from '../anylist-js/lib/item.js';
 import { normalizeRecipe } from './recipe-normalizer.js';
+import { DEFAULT_KEYCHAIN_SERVICE, readKeychainAccount, readKeychainPassword } from './keychain.js';
 
 // Patch Item._encode to not include 'quantity' field which doesn't exist in protobuf schema
 Item.prototype._encode = function() {
@@ -22,7 +23,7 @@ class AnyListClient {
   /**
    * @param {{ username?: string, password?: string, defaultListName?: string }} [credentials]
    *   Optional credentials. Falls back to ANYLIST_USERNAME / ANYLIST_PASSWORD / ANYLIST_LIST_NAME
-   *   environment variables when not provided (stdio mode).
+   *   environment variables. If no password is provided, reads macOS Keychain.
    */
   constructor({ username, password, defaultListName } = {}) {
     this.client = null;
@@ -32,18 +33,22 @@ class AnyListClient {
     this.defaultListName = defaultListName || null;
   }
 
-  async connect(listName = null) {
-    const username = this._username || process.env.ANYLIST_USERNAME;
-    const password = this._password || process.env.ANYLIST_PASSWORD;
+  async connect(listName = null, { requireList = true } = {}) {
+    const service = process.env.ANYLIST_KEYCHAIN_SERVICE || DEFAULT_KEYCHAIN_SERVICE;
+    let username = this._username || process.env.ANYLIST_USERNAME;
+    let password = this._password || process.env.ANYLIST_PASSWORD;
     const targetListName = listName || this.defaultListName || process.env.ANYLIST_LIST_NAME;
 
-    if (!username || !password) {
-      const error = new Error('Missing AnyList credentials. Provide username and password.');
-      console.error(error.message);
-      throw error;
+    if (!username) {
+      username = await readKeychainAccount(service);
     }
 
-    if (!targetListName) {
+    if (!password) {
+      password = await readKeychainPassword(username, service);
+    }
+
+
+    if (requireList && !targetListName) {
       const error = new Error('No list name provided and no default list configured');
       console.error(error.message);
       throw error;
@@ -70,7 +75,11 @@ class AnyListClient {
         await this.client.getLists();
       }
 
-      // Find the target list
+      if (!requireList && !targetListName) {
+        return true;
+      }
+
+     // Find the target list
       console.error(`Looking for list: "${targetListName}"`);
       this.targetList = this.client.getListByName(targetListName);
 
@@ -387,15 +396,18 @@ class AnyListClient {
     }
   }
 
-  async getRecipeDetails(recipeName) {
+  async getRecipeDetails(recipeReference) {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
     }
     try {
       const recipes = await this.client.getRecipes();
-      const recipe = recipes.find(r => r.name && r.name.toLowerCase() === recipeName.toLowerCase());
+      const recipe = recipes.find(r =>
+        r.identifier === recipeReference ||
+        (r.name && r.name.toLowerCase() === recipeReference.toLowerCase())
+      );
       if (!recipe) {
-        throw new Error(`Recipe "${recipeName}" not found`);
+        throw new Error(`Recipe "${recipeReference}" not found`);
       }
       return {
         identifier: recipe.identifier,

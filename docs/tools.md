@@ -73,8 +73,10 @@ Manage AnyList recipes, including URL import and text parsing.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `action` | enum | Yes | See actions below |
-| `name` | string | For most actions | Recipe name |
+| `name` | string | For most actions | Recipe name (or AnyList recipe ID for `get`) |
 | `search` | string | No | Filter recipes by name (list only) |
+| `limit` | integer | No | Maximum recipes to return, 1-100 (list only, default 25) |
+| `offset` | integer | No | Number of matching recipes to skip (list only, default 0) |
 | `ingredients` | array | No | `[{ name, quantity }]` (create only) |
 | `steps` | string[] | No | Preparation steps (create only) |
 | `note` | string | No | Recipe notes (create only) |
@@ -90,13 +92,16 @@ Manage AnyList recipes, including URL import and text parsing.
 **Actions:**
 
 ```json
-// Browse all recipes (summaries: name, rating, times, servings)
+// Browse the first 25 recipes (summaries: name, rating, times, servings)
 { "name": "recipes", "arguments": { "action": "list" } }
+
+// Browse the next 25 recipes
+{ "name": "recipes", "arguments": { "action": "list", "offset": 25 } }
 
 // Search recipes
 { "name": "recipes", "arguments": { "action": "list", "search": "chicken" } }
 
-// Get full details — ingredients and steps
+// Get full details — ingredients and steps (name or ID)
 { "name": "recipes", "arguments": { "action": "get", "name": "Chicken Tikka Masala" } }
 
 // Create a recipe
