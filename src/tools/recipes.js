@@ -1,4 +1,4 @@
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
@@ -70,9 +70,10 @@ export function register(server, getClient) {
 - delete: Delete a recipe by name
 - import_url: Import a recipe from a website URL (parses ingredients, steps, etc.)
 - normalize: Preview/parse a recipe from a URL or raw text without saving (set save=true to also save)
+- apply_updates: Apply many recipe updates from a local JSON file, so a large edit does not need one tool call per recipe. The file is a JSON array of objects, each with "id" plus any of the update fields (note, ingredients, prep_time, cook_time, servings, rating, new_name, steps_replace). Use dry_run to validate the file and preview the change counts without writing.
 - backup: Write every recipe and collection to a local backup directory at full fidelity (ingredient IDs, headings, ratings, nutrition, collection membership), and download the photo files. One API call regardless of library size; photos are one download each.`,
     inputSchema: {
-      action: z.enum(["list", "get", "create", "update", "delete", "import_url", "normalize", "backup"]).describe("The recipe action to perform"),
+      action: z.enum(["list", "get", "create", "update", "delete", "import_url", "normalize", "backup", "apply_updates"]).describe("The recipe action to perform"),
       name: z.string().optional().describe("Recipe name or ID (required for get, update and delete; name required for create)"),
       new_name: z.string().optional().describe("Rename the recipe to this (update only)"),
       search: z.string().optional().describe("Search query to filter recipes (list only)"),
@@ -98,9 +99,10 @@ export function register(server, getClient) {
       save: z.boolean().optional().describe("If true, also save normalized recipe to AnyList (normalize only, default false)"),
       path: z.string().optional().describe("Directory to write the backup into (backup only). Defaults to ./anylist-backup-<timestamp>/"),
       include_photos: z.boolean().optional().describe("Download recipe photo files as well as metadata (backup only, default true)"),
+      dry_run: z.boolean().optional().describe("Validate and report what would change without writing (apply_updates only)"),
     }
   }, async (params) => {
-    const { action, name, new_name, search, limit = 25, offset = 0, ingredients, steps, steps_replace, note, source_name, source_url, prep_time, cook_time, rating, servings, url, text: recipeText, save: saveRecipe, path: backupPath, include_photos: includePhotos = true } = params;
+    const { action, name, new_name, search, limit = 25, offset = 0, ingredients, steps, steps_replace, note, source_name, source_url, prep_time, cook_time, rating, servings, url, text: recipeText, save: saveRecipe, path: backupPath, include_photos: includePhotos = true, dry_run: dryRun = false } = params;
     try {
       const client = await getClient();
       await client.connect(null, { requireList: false });
@@ -214,6 +216,51 @@ export function register(server, getClient) {
             .map(c => `- ${c.field}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`)
             .join('\n');
           return textResponse(`Updated "${updated.name}" (${updated.identifier}):\n${summary}`);
+        }
+        case "apply_updates": {
+          if (!backupPath) throw new Error('Action "apply_updates" requires "path" to a JSON file');
+          const file = resolve(backupPath.startsWith('~/') ? join(homedir(), backupPath.slice(2)) : backupPath);
+          const parsed = JSON.parse(await readFile(file, 'utf8'));
+          if (!Array.isArray(parsed)) throw new Error('The file must contain a JSON array of update objects');
+
+          const results = [];
+          for (const entry of parsed) {
+            if (!entry || !entry.id) { results.push({ id: entry && entry.id, status: 'skipped', reason: 'missing id' }); continue; }
+            const fields = {};
+            if (entry.new_name !== undefined) fields.name = entry.new_name;
+            if (entry.note !== undefined) fields.note = entry.note;
+            if (entry.source_name !== undefined) fields.sourceName = entry.source_name;
+            if (entry.source_url !== undefined) fields.sourceUrl = entry.source_url;
+            if (entry.prep_time !== undefined) fields.prepTime = entry.prep_time;
+            if (entry.cook_time !== undefined) fields.cookTime = entry.cook_time;
+            if (entry.rating !== undefined) fields.rating = entry.rating;
+            if (entry.servings !== undefined) fields.servings = entry.servings;
+            if (entry.steps_replace !== undefined) fields.preparationSteps = entry.steps_replace;
+            if (entry.ingredients !== undefined) {
+              fields.ingredients = entry.ingredients.map(i => ({
+                name: i.name, quantity: i.quantity, note: i.note || null, isHeading: Boolean(i.is_heading),
+              }));
+            }
+            if (Object.keys(fields).length === 0) { results.push({ id: entry.id, status: 'skipped', reason: 'no fields' }); continue; }
+            if (dryRun) { results.push({ id: entry.id, status: 'would-update', fields: Object.keys(fields) }); continue; }
+            try {
+              const r = await client.updateRecipe(entry.id, fields);
+              results.push({ id: entry.id, name: r.name, status: r.changed.length ? 'updated' : 'no-change', changed: r.changed.length });
+            } catch (error) {
+              results.push({ id: entry.id, status: 'failed', reason: error.message });
+            }
+          }
+          const tallyOf = s2 => results.filter(r => r.status === s2).length;
+          const failures = results.filter(r => r.status === 'failed' || r.status === 'skipped');
+          let out = dryRun
+            ? `Dry run: ${tallyOf('would-update')} of ${parsed.length} entries would be updated.`
+            : `Applied ${tallyOf('updated')} of ${parsed.length} updates (${tallyOf('no-change')} already matched).`;
+          if (failures.length) {
+            out += `\n${failures.length} not applied:\n` + failures.slice(0, 15)
+              .map(f => `- ${f.id}: ${f.reason}`).join('\n');
+            if (failures.length > 15) out += `\n…and ${failures.length - 15} more`;
+          }
+          return textResponse(out);
         }
         case "backup": {
           const data = await client.exportRecipes();
