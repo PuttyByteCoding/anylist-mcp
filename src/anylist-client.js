@@ -865,20 +865,29 @@ class AnyListClient {
       );
       if (!raw) throw new Error(`Recipe collection "${collectionReference}" not found`);
       const collection = this.client.createRecipeCollection(raw);
+      const membership = collection.recipeIds || [];
       const applied = [];
       const skipped = [];
       for (const recipeId of recipeIds) {
-        const present = collection.recipeIds.includes(recipeId);
-        if (mode === 'add' ? present : !present) {
-          skipped.push(recipeId);
-          continue;
-        }
+        const present = membership.includes(recipeId);
+        if (mode === 'add' ? present : !present) skipped.push(recipeId);
+        else applied.push(recipeId);
+      }
+      if (applied.length > 0) {
         if (mode === 'add') {
-          await collection.addRecipe(recipeId);
+          for (const recipeId of applied) {
+            await collection.addRecipe(recipeId);
+          }
         } else {
-          await collection.removeRecipe(recipeId);
+          // Do NOT use collection.removeRecipe(): it calls performOperation()
+          // before splicing, so the payload carries the collection's entire
+          // membership. The 'remove-recipes-from-collection' handler removes
+          // every id in the payload, so that empties the whole collection.
+          // Verified against the live API 2026-08-29: removing 1 of 3 recipes
+          // removed all 3. Send only the recipes actually being removed.
+          collection.recipeIds = applied;
+          await collection.performOperation('remove-recipes-from-collection');
         }
-        applied.push(recipeId);
       }
       console.error(`Collection ${raw.name}: ${mode} ${applied.length} recipe(s)`);
       return { name: raw.name, applied, skipped };
